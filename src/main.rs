@@ -149,7 +149,7 @@ fn get_str_from_osstr(osstr: &Option<&OsStr>) -> Result<String, Box<dyn Error>> 
 }
 
 fn is_already_processed(filename: &String) -> bool {
-    filename.len() == 64 || filename.chars().all(|c| c.is_ascii_hexdigit())
+    filename.len() == 64 && filename.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn is_already_exists(filename: &String) -> bool {
