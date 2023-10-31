@@ -1,17 +1,14 @@
+use argparse::{ArgumentParser, List, StoreTrue};
+use rayon::prelude::*;
+use sha256::try_digest;
 use std::{
-    process::exit,
-    path::{
-        Path,
-        PathBuf,
-    },
-    fs,
-    result::Result,
     error::Error,
     ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::exit,
+    result::Result,
 };
-use argparse::{ArgumentParser, StoreTrue, List};
-use sha256::try_digest;
-use rayon::prelude::*;
 
 struct GlobalOptions {
     verbose: bool,
@@ -38,69 +35,60 @@ fn main() {
         exit(0);
     }
 
-    opts.files.par_iter().for_each(
-        |x| {
-            match process_file(&opts, &x) {
-                Ok(result) => {
-                    if result.len() > 0 {
-                        println!("\"{}\" -> {:?}", x, result);
-                    }
-                }
-                Err(msg) => {
-                    if opts.verbose {
-                        eprintln!("Skipped \"{}\": {}", x, msg.to_string());
-                    }
+    opts.files
+        .par_iter()
+        .for_each(|x| match process_file(&opts, &x) {
+            Ok(result) => {
+                if result.len() > 0 {
+                    println!("\"{}\" -> {:?}", x, result);
                 }
             }
-        }
-    );
+            Err(msg) => {
+                if opts.verbose {
+                    eprintln!("Skipped \"{}\": {}", x, msg.to_string());
+                }
+            }
+        });
 }
 
 fn parse_args(opts: &mut GlobalOptions) {
     let mut ap = ArgumentParser::new();
     ap.set_description("Rename files to their hash");
-    ap.refer(&mut opts.dry_run)
-        .add_option(
-            &["-d", "--dry-run"],
-            StoreTrue,
-            "Do not actually rename files",
-        );
-    ap.refer(&mut opts.force_rehash)
-        .add_option(
-            &["-f", "--force-rehash"],
-            StoreTrue,
-            "Process the file even if it looks like it has already been processed",
-        );
-    ap.refer(&mut opts.force_rename)
-        .add_option(
-            &["-F", "--force-rename"],
-            StoreTrue,
-            "Rename file even there is another file with the same result name",
-        );
-    ap.refer(&mut opts.verbose)
-        .add_option(
-            &["-v", "--verbose"],
-            StoreTrue,
-            "Print more information during processing",
-        );
-    ap.refer(&mut opts.version)
-        .add_option(
-            &["-V", "--version"],
-            StoreTrue,
-            "Print version and exit",
-        );
+    ap.refer(&mut opts.dry_run).add_option(
+        &["-d", "--dry-run"],
+        StoreTrue,
+        "Do not actually rename files",
+    );
+    ap.refer(&mut opts.force_rehash).add_option(
+        &["-f", "--force-rehash"],
+        StoreTrue,
+        "Process the file even if it looks like it has already been processed",
+    );
+    ap.refer(&mut opts.force_rename).add_option(
+        &["-F", "--force-rename"],
+        StoreTrue,
+        "Rename file even there is another file with the same result name",
+    );
+    ap.refer(&mut opts.verbose).add_option(
+        &["-v", "--verbose"],
+        StoreTrue,
+        "Print more information during processing",
+    );
+    ap.refer(&mut opts.version).add_option(
+        &["-V", "--version"],
+        StoreTrue,
+        "Print version and exit",
+    );
     ap.refer(&mut opts.files)
-        .add_argument(
-            "file",
-            List,
-            "Files to process",
-        );
+        .add_argument("file", List, "Files to process");
     ap.parse_args_or_exit();
 }
 
 fn process_file(opts: &GlobalOptions, raw_filename: &String) -> Result<String, Box<dyn Error>> {
     let path_file = Path::new(raw_filename);
-    if fs::symlink_metadata(raw_filename)?.file_type().is_symlink() || !fs::metadata(raw_filename)?.file_type().is_file() {
+    if fs::symlink_metadata(raw_filename)?.file_type().is_symlink()
+        || !fs::metadata(raw_filename)?.file_type().is_file()
+    {
         return Err(Box::from("Not a file"));
     }
 
@@ -114,7 +102,7 @@ fn process_file(opts: &GlobalOptions, raw_filename: &String) -> Result<String, B
     let result_hash = try_digest(path_file)?;
     let result_filename = match file_ext.len() {
         0 => result_hash,
-        _ => format!("{}.{}", result_hash, file_ext)
+        _ => format!("{}.{}", result_hash, file_ext),
     };
 
     let mut path = PathBuf::from(path_file);
@@ -122,7 +110,7 @@ fn process_file(opts: &GlobalOptions, raw_filename: &String) -> Result<String, B
 
     let result_path = match path.into_os_string().into_string() {
         Ok(s) => s,
-        Err(_) => return Err(Box::from("Could not process filename"))
+        Err(_) => return Err(Box::from("Could not process filename")),
     };
 
     if !opts.force_rename && is_already_exists(&result_path) {
@@ -137,15 +125,13 @@ fn process_file(opts: &GlobalOptions, raw_filename: &String) -> Result<String, B
 }
 
 fn get_str_from_osstr(osstr: &Option<&OsStr>) -> Result<String, Box<dyn Error>> {
-    Ok(
-        match osstr {
-            Some(n) => match n.to_str() {
-                Some(s) => s.to_string(),
-                None => return Err(Box::from("Could not get string from OsStr"))
-            },
-            None => return Err(Box::from("Could not get string from OsStr"))
-        }
-    )
+    Ok(match osstr {
+        Some(n) => match n.to_str() {
+            Some(s) => s.to_string(),
+            None => return Err(Box::from("Could not get string from OsStr")),
+        },
+        None => return Err(Box::from("Could not get string from OsStr")),
+    })
 }
 
 fn is_already_processed(filename: &String) -> bool {
