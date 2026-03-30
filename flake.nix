@@ -17,7 +17,6 @@
 
       package = {
         lib,
-        fetchFromGitHub,
         rustPlatform,
       }:
         rustPlatform.buildRustPackage rec {
