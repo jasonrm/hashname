@@ -1,11 +1,12 @@
 use argparse::{ArgumentParser, List, StoreOption, StoreTrue};
 use glob::glob;
 use rayon::prelude::*;
-use sha256::try_digest;
+use sha2::{Digest, Sha256};
 use std::{
     error::Error,
     ffi::OsStr,
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, BufRead},
     path::{Path, PathBuf},
 };
 
@@ -172,7 +173,7 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
         return Err(ProcessFileError::AlreadyProcessed);
     }
 
-    let result_hash = try_digest(raw_path)?;
+    let result_hash = hash_file(raw_path)?;
     let result_filename = match raw_path.extension().and_then(OsStr::to_str) {
         Some(extension) if !extension.is_empty() => format!("{result_hash}.{extension}"),
         _ => result_hash,
@@ -209,6 +210,39 @@ fn path_component_to_str<'a>(
 
 fn is_already_processed(filename: &str) -> bool {
     filename.len() == 64 && filename.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn hash_file(path: &Path) -> Result<String, ProcessFileError> {
+    let file = fs::File::open(path)?;
+    let mut reader = io::BufReader::with_capacity(256 * 1024, file);
+    let mut hasher = Sha256::new();
+
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        hasher.update(buf);
+        let len = buf.len();
+        reader.consume(len);
+    }
+
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(nibble_to_hex(byte >> 4));
+        output.push(nibble_to_hex(byte & 0x0f));
+    }
+
+    Ok(output)
+}
+
+fn nibble_to_hex(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'a' + (nibble - 10)) as char,
+        _ => unreachable!("nibble must be in 0..=15"),
+    }
 }
 
 #[cfg(test)]
@@ -265,7 +299,7 @@ mod tests {
     fn renames_extensionless_files_without_error() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example", b"hello world");
-        let expected = dir.path().join(try_digest(&source).unwrap());
+        let expected = dir.path().join(hash_file(&source).unwrap());
 
         let result = process_file(&GlobalOptions::default(), &source).unwrap();
 
@@ -278,9 +312,7 @@ mod tests {
     fn copies_files_when_copy_mode_is_enabled() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example.txt", b"hello world");
-        let expected = dir
-            .path()
-            .join(format!("{}.txt", try_digest(&source).unwrap()));
+        let expected = dir.path().join(format!("{}.txt", hash_file(&source).unwrap()));
 
         let opts = GlobalOptions {
             copy: true,
@@ -299,7 +331,7 @@ mod tests {
         let output_dir = dir.path().join("hashed");
         fs::create_dir_all(&output_dir).unwrap();
         let source = write_file(dir.path(), "example.txt", b"hello world");
-        let expected = output_dir.join(format!("{}.txt", try_digest(&source).unwrap()));
+        let expected = output_dir.join(format!("{}.txt", hash_file(&source).unwrap()));
 
         let opts = GlobalOptions {
             output_dir: Some(output_dir.clone()),
@@ -316,9 +348,7 @@ mod tests {
     fn rejects_existing_destination_without_force_rename() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example.txt", b"hello world");
-        let destination = dir
-            .path()
-            .join(format!("{}.txt", try_digest(&source).unwrap()));
+        let destination = dir.path().join(format!("{}.txt", hash_file(&source).unwrap()));
         fs::write(&destination, b"existing").unwrap();
 
         let err = process_file(&GlobalOptions::default(), &source).unwrap_err();
