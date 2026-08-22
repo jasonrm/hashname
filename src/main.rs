@@ -175,7 +175,9 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
 
     let result_hash = hash_file(raw_path)?;
     let result_filename = match raw_path.extension().and_then(OsStr::to_str) {
-        Some(extension) if !extension.is_empty() => format!("{result_hash}.{extension}"),
+        Some(extension) if !extension.is_empty() => {
+            format!("{result_hash}.{}", normalize_extension(extension))
+        }
         _ => result_hash,
     };
 
@@ -210,6 +212,13 @@ fn path_component_to_str<'a>(
 
 fn is_already_processed(filename: &str) -> bool {
     filename.len() == 64 && filename.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn normalize_extension(extension: &str) -> String {
+    match extension.to_ascii_lowercase().as_str() {
+        "jpeg" | "jpe" => "jpg".to_owned(),
+        extension => extension.to_owned(),
+    }
 }
 
 fn hash_file(path: &Path) -> Result<String, ProcessFileError> {
@@ -296,6 +305,28 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_extensions() {
+        assert_eq!(normalize_extension("PNG"), "png");
+        assert_eq!(normalize_extension("JPEG"), "jpg");
+        assert_eq!(normalize_extension("jpe"), "jpg");
+    }
+
+    #[test]
+    fn renames_jpeg_files_with_the_common_lowercase_extension() {
+        let dir = TestDir::new();
+        let source = write_file(dir.path(), "input-file.JPEG", b"hello world");
+        let expected = dir
+            .path()
+            .join(format!("{}.jpg", hash_file(&source).unwrap()));
+
+        let result = process_file(&GlobalOptions::default(), &source).unwrap();
+
+        assert_eq!(result, expected);
+        assert!(result.exists());
+        assert!(!source.exists());
+    }
+
+    #[test]
     fn renames_extensionless_files_without_error() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example", b"hello world");
@@ -312,7 +343,9 @@ mod tests {
     fn copies_files_when_copy_mode_is_enabled() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example.txt", b"hello world");
-        let expected = dir.path().join(format!("{}.txt", hash_file(&source).unwrap()));
+        let expected = dir
+            .path()
+            .join(format!("{}.txt", hash_file(&source).unwrap()));
 
         let opts = GlobalOptions {
             copy: true,
@@ -348,7 +381,9 @@ mod tests {
     fn rejects_existing_destination_without_force_rename() {
         let dir = TestDir::new();
         let source = write_file(dir.path(), "example.txt", b"hello world");
-        let destination = dir.path().join(format!("{}.txt", hash_file(&source).unwrap()));
+        let destination = dir
+            .path()
+            .join(format!("{}.txt", hash_file(&source).unwrap()));
         fs::write(&destination, b"existing").unwrap();
 
         let err = process_file(&GlobalOptions::default(), &source).unwrap_err();

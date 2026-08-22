@@ -2,7 +2,7 @@
 
 `hashname` renames files to their SHA-256 hash.
 
-It is useful when you want stable, content-based filenames for a set of files. By default it moves each file in place, preserving the original extension when there is one.
+It is useful when you want stable, content-based filenames for a set of files. By default it moves each file in place, preserving the original extension when there is one. Extensions are normalized to lowercase, and JPEG aliases such as `.jpeg` and `.jpe` are normalized to the more common `.jpg`.
 
 ## What It Does
 
@@ -12,7 +12,7 @@ Given a file like `photo.jpg`, `hashname` will rename it to something like:
 0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543.jpg
 ```
 
-If the file has no extension, the result is just the hash.
+For example, `input-file.JPEG` becomes `<hash>.jpg`. If the file has no extension, the result is just the hash.
 
 ## Usage
 
