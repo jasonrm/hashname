@@ -33,7 +33,7 @@ Paths can be files or directories. Directory inputs process their immediate file
 - `--force-rename`: overwrite an existing destination path
 - `--verbose`: print skipped files and the reason they were skipped
 
-Extension matching is case-insensitive, accepts entries with or without a leading dot, and treats JPEG aliases as `.jpg`. `--copy-to` and `--move-to` create the destination directory when needed and cannot be used together.
+Extension matching is case-insensitive, accepts entries with or without a leading dot, and treats JPEG aliases as `.jpg`. `--copy-to` and `--move-to` create the destination directory when needed and cannot be used together. `--move-to` works across filesystems by copying successfully before deleting the source. If an identical hash-named destination already exists, it removes the redundant source; a destination with different contents is left untouched and reported with its full path.
 
 ## Examples
 

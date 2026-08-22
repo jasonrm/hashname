@@ -26,7 +26,7 @@ struct GlobalOptions {
 
 #[derive(Debug)]
 enum ProcessFileError {
-    AlreadyExists,
+    AlreadyExists(PathBuf),
     AlreadyProcessed,
     InvalidPathComponent(&'static str),
     Io(io::Error),
@@ -37,7 +37,9 @@ enum ProcessFileError {
 impl fmt::Display for ProcessFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AlreadyExists => write!(f, "Already exists"),
+            Self::AlreadyExists(path) => {
+                write!(f, "Already exists: \"{}\"", path.display())
+            }
             Self::AlreadyProcessed => write!(f, "Already processed"),
             Self::InvalidPathComponent(component) => {
                 write!(f, "Could not read {component} from path")
@@ -328,7 +330,7 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
         Some(extension) if !extension.is_empty() => {
             format!("{result_hash}.{}", normalize_extension(extension))
         }
-        _ => result_hash,
+        _ => result_hash.clone(),
     };
 
     let result_path = match output_dir(opts) {
@@ -336,19 +338,59 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
         None => raw_path.with_file_name(&result_filename),
     };
 
-    if !opts.force_rename && result_path.exists() {
-        return Err(ProcessFileError::AlreadyExists);
+    if result_path.exists() {
+        let is_move_duplicate = opts.move_to.is_some()
+            && !paths_refer_to_same_file(raw_path, &result_path)
+            && hash_file(&result_path)? == result_hash;
+
+        if is_move_duplicate {
+            if !opts.dry_run {
+                fs::remove_file(raw_path)?;
+            }
+            return Ok(result_path);
+        }
+
+        if !opts.force_rename {
+            return Err(ProcessFileError::AlreadyExists(result_path));
+        }
     }
 
     if !opts.dry_run {
         if opts.copy_to.is_some() {
             fs::copy(raw_path, &result_path)?;
         } else {
-            fs::rename(raw_path, &result_path)?;
+            move_file(raw_path, &result_path)?;
         }
     }
 
     Ok(result_path)
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn move_file(source: &Path, destination: &Path) -> io::Result<()> {
+    move_file_with(source, destination, |source, destination| {
+        fs::rename(source, destination)
+    })
+}
+
+fn move_file_with<F>(source: &Path, destination: &Path, rename: F) -> io::Result<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    match rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn path_component_to_str<'a>(
@@ -603,9 +645,90 @@ mod tests {
 
         let err = process_file(&GlobalOptions::default(), &source).unwrap_err();
 
-        assert!(matches!(err, ProcessFileError::AlreadyExists));
+        assert!(matches!(
+            err,
+            ProcessFileError::AlreadyExists(ref path) if path == &destination
+        ));
+        assert_eq!(
+            err.to_string(),
+            format!("Already exists: \"{}\"", destination.display())
+        );
         assert!(source.exists());
         assert!(destination.exists());
+    }
+
+    #[test]
+    fn removes_move_source_when_identical_destination_exists() {
+        let dir = TestDir::new();
+        let output_dir = dir.path().join("hashed");
+        fs::create_dir(&output_dir).unwrap();
+        let source = write_file(dir.path(), "example.txt", b"hello world");
+        let destination = output_dir.join(format!("{}.txt", hash_file(&source).unwrap()));
+        fs::write(&destination, b"hello world").unwrap();
+        let opts = GlobalOptions {
+            move_to: Some(output_dir),
+            ..GlobalOptions::default()
+        };
+
+        let result = process_file(&opts, &source).unwrap();
+
+        assert_eq!(result, destination);
+        assert!(!source.exists());
+        assert_eq!(fs::read(destination).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn keeps_move_source_when_existing_destination_differs() {
+        let dir = TestDir::new();
+        let output_dir = dir.path().join("hashed");
+        fs::create_dir(&output_dir).unwrap();
+        let source = write_file(dir.path(), "example.txt", b"hello world");
+        let destination = output_dir.join(format!("{}.txt", hash_file(&source).unwrap()));
+        fs::write(&destination, b"different contents").unwrap();
+        let opts = GlobalOptions {
+            move_to: Some(output_dir),
+            ..GlobalOptions::default()
+        };
+
+        let err = process_file(&opts, &source).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProcessFileError::AlreadyExists(ref path) if path == &destination
+        ));
+        assert!(source.exists());
+        assert_eq!(fs::read(destination).unwrap(), b"different contents");
+    }
+
+    #[test]
+    fn falls_back_to_copy_and_delete_for_cross_device_moves() {
+        let dir = TestDir::new();
+        let source = write_file(dir.path(), "source.txt", b"hello world");
+        let destination = dir.path().join("destination.txt");
+
+        move_file_with(&source, &destination, |_, _| {
+            Err(io::Error::from(io::ErrorKind::CrossesDevices))
+        })
+        .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(destination).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn keeps_source_when_cross_device_copy_fails() {
+        let dir = TestDir::new();
+        let source = write_file(dir.path(), "source.txt", b"hello world");
+        let destination = dir.path().join("missing").join("destination.txt");
+
+        let err = move_file_with(&source, &destination, |_, _| {
+            Err(io::Error::from(io::ErrorKind::CrossesDevices))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(source.exists());
+        assert!(!destination.exists());
     }
 
     #[test]
