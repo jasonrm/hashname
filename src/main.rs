@@ -1,4 +1,4 @@
-use argparse::{ArgumentParser, List, StoreOption, StoreTrue};
+use argparse::{ArgumentParser, Collect, List, StoreOption, StoreTrue};
 use glob::glob;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -16,11 +16,12 @@ struct GlobalOptions {
     force_rehash: bool,
     force_rename: bool,
     dry_run: bool,
+    recursive: bool,
     version: bool,
-    extensions: Option<String>,
-    output_dir: Option<PathBuf>,
-    copy: bool,
-    files: Vec<String>,
+    extensions: Vec<String>,
+    copy_to: Option<PathBuf>,
+    move_to: Option<PathBuf>,
+    paths: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -79,25 +80,46 @@ fn main() {
         return;
     }
 
-    let extensions = parse_extensions(opts.extensions.as_deref());
-    filter_files(&opts.files, extensions.as_deref(), opts.verbose)
-        .par_iter()
-        .for_each(|path| match process_file(&opts, path) {
-            Ok(result) => println!("\"{}\" -> \"{}\"", path.display(), result.display()),
-            Err(err) if opts.verbose => {
-                eprintln!("Skipped \"{}\": {}", path.display(), err);
-            }
-            Err(_) => {}
-        });
+    if let Err(message) = validate_options(&opts) {
+        eprintln!("hashname: {message}");
+        std::process::exit(2);
+    }
+
+    if !opts.dry_run
+        && let Some(output_dir) = output_dir(&opts)
+        && let Err(err) = fs::create_dir_all(output_dir)
+    {
+        eprintln!(
+            "Could not create output directory \"{}\": {err}",
+            output_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    let extensions = parse_extensions(&opts.extensions);
+    filter_files(
+        &opts.paths,
+        extensions.as_deref(),
+        opts.recursive,
+        opts.verbose,
+    )
+    .par_iter()
+    .for_each(|path| match process_file(&opts, path) {
+        Ok(result) => println!("\"{}\" -> \"{}\"", path.display(), result.display()),
+        Err(err) if opts.verbose => {
+            eprintln!("Skipped \"{}\": {}", path.display(), err);
+        }
+        Err(_) => {}
+    });
 }
 
 fn parse_args(opts: &mut GlobalOptions) {
     let mut ap = ArgumentParser::new();
     ap.set_description("Rename files to their hash");
     ap.refer(&mut opts.dry_run).add_option(
-        &["-d", "--dry-run"],
+        &["-n", "--dry-run"],
         StoreTrue,
-        "Do not actually rename files",
+        "Preview operations without changing files",
     );
     ap.refer(&mut opts.force_rehash).add_option(
         &["-f", "--force-rehash"],
@@ -107,22 +129,27 @@ fn parse_args(opts: &mut GlobalOptions) {
     ap.refer(&mut opts.force_rename).add_option(
         &["-F", "--force-rename"],
         StoreTrue,
-        "Rename file even there is another file with the same result name",
+        "Overwrite an existing destination file",
     );
     ap.refer(&mut opts.extensions).add_option(
-        &["--extensions"],
-        StoreOption,
-        "Only process files with an extension in this comma-separated list",
+        &["-e", "--extension"],
+        Collect,
+        "Process this extension; repeatable or comma-separated",
     );
-    ap.refer(&mut opts.output_dir).add_option(
-        &["-o", "--output-dir"],
-        StoreOption,
-        "Renamed files are moved to this directory",
-    );
-    ap.refer(&mut opts.copy).add_option(
-        &["-c", "--copy"],
+    ap.refer(&mut opts.recursive).add_option(
+        &["-r", "--recursive"],
         StoreTrue,
-        "Copy files to new name instead of moving",
+        "Traverse directory inputs recursively",
+    );
+    ap.refer(&mut opts.copy_to).add_option(
+        &["--copy-to"],
+        StoreOption,
+        "Copy renamed files into this directory",
+    );
+    ap.refer(&mut opts.move_to).add_option(
+        &["--move-to"],
+        StoreOption,
+        "Move renamed files into this directory",
     );
     ap.refer(&mut opts.verbose).add_option(
         &["-v", "--verbose"],
@@ -134,33 +161,46 @@ fn parse_args(opts: &mut GlobalOptions) {
         StoreTrue,
         "Print version and exit",
     );
-    ap.refer(&mut opts.files)
-        .add_argument("file", List, "Files to process");
+    ap.refer(&mut opts.paths)
+        .add_argument("path", List, "Files or directories to process");
     ap.parse_args_or_exit();
 }
 
+fn validate_options(opts: &GlobalOptions) -> Result<(), &'static str> {
+    if opts.copy_to.is_some() && opts.move_to.is_some() {
+        return Err("--copy-to and --move-to cannot be used together");
+    }
+    Ok(())
+}
+
+fn output_dir(opts: &GlobalOptions) -> Option<&Path> {
+    opts.copy_to.as_deref().or(opts.move_to.as_deref())
+}
+
 fn filter_files(
-    file_paths: &[String],
+    paths: &[String],
     extensions: Option<&[String]>,
+    recursive: bool,
     verbose: bool,
 ) -> Vec<PathBuf> {
     let mut valid_files = Vec::new();
 
-    for path in file_paths {
+    for path in paths {
         let candidate = Path::new(path);
         if candidate.exists() {
-            if matches_extensions(candidate, extensions) {
-                valid_files.push(candidate.to_path_buf());
-            }
+            collect_path(candidate, extensions, recursive, verbose, &mut valid_files);
         } else {
             match glob(path) {
                 Ok(entries) => {
                     for entry in entries {
                         match entry {
-                            Ok(path) if path.exists() && matches_extensions(&path, extensions) => {
-                                valid_files.push(path)
-                            }
-                            Ok(_) => {}
+                            Ok(path) => collect_path(
+                                &path,
+                                extensions,
+                                recursive,
+                                verbose,
+                                &mut valid_files,
+                            ),
                             Err(err) if verbose => {
                                 eprintln!("Skipped glob entry for \"{path}\": {err}")
                             }
@@ -177,16 +217,87 @@ fn filter_files(
     valid_files
 }
 
-fn parse_extensions(extensions: Option<&str>) -> Option<Vec<String>> {
-    extensions.map(|extensions| {
-        extensions
-            .split(',')
+fn collect_path(
+    path: &Path,
+    extensions: Option<&[String]>,
+    recursive: bool,
+    verbose: bool,
+    files: &mut Vec<PathBuf>,
+) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            if verbose {
+                eprintln!("Skipped \"{}\": {err}", path.display());
+            }
+            return;
+        }
+    };
+
+    if metadata.file_type().is_file() {
+        if matches_extensions(path, extensions) {
+            files.push(path.to_path_buf());
+        }
+        return;
+    }
+
+    if !metadata.file_type().is_dir() {
+        return;
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) => {
+            if verbose {
+                eprintln!("Skipped directory \"{}\": {err}", path.display());
+            }
+            return;
+        }
+    };
+
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let entry_path = entry.path();
+                match entry.file_type() {
+                    Ok(file_type) if file_type.is_file() => {
+                        if matches_extensions(&entry_path, extensions) {
+                            files.push(entry_path);
+                        }
+                    }
+                    Ok(file_type) if recursive && file_type.is_dir() => {
+                        collect_path(&entry_path, extensions, true, verbose, files);
+                    }
+                    Ok(_) => {}
+                    Err(err) if verbose => {
+                        eprintln!("Skipped \"{}\": {err}", entry_path.display());
+                    }
+                    Err(_) => {}
+                }
+            }
+            Err(err) if verbose => {
+                eprintln!("Skipped directory entry in \"{}\": {err}", path.display());
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn parse_extensions(values: &[String]) -> Option<Vec<String>> {
+    if values.is_empty() {
+        return None;
+    }
+
+    Some(
+        values
+            .iter()
+            .flat_map(|value| value.split(','))
             .map(str::trim)
             .map(|extension| extension.trim_start_matches('.'))
             .filter(|extension| !extension.is_empty())
             .map(normalize_extension)
-            .collect()
-    })
+            .collect(),
+    )
 }
 
 fn matches_extensions(path: &Path, extensions: Option<&[String]>) -> bool {
@@ -220,7 +331,7 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
         _ => result_hash,
     };
 
-    let result_path = match &opts.output_dir {
+    let result_path = match output_dir(opts) {
         Some(output_dir) => output_dir.join(&result_filename),
         None => raw_path.with_file_name(&result_filename),
     };
@@ -230,7 +341,7 @@ fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, Proces
     }
 
     if !opts.dry_run {
-        if opts.copy {
+        if opts.copy_to.is_some() {
             fs::copy(raw_path, &result_path)?;
         } else {
             fs::rename(raw_path, &result_path)?;
@@ -351,17 +462,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_case_insensitive_extension_lists() {
+    fn parses_repeated_and_comma_separated_extensions() {
         assert_eq!(
-            parse_extensions(Some(" JPG, .PnG, jpeg ")),
+            parse_extensions(&[" JPG, .PnG".to_owned(), "jpeg ".to_owned()]),
             Some(vec!["jpg".to_owned(), "png".to_owned(), "jpg".to_owned()])
         );
-        assert_eq!(parse_extensions(None), None);
+        assert_eq!(parse_extensions(&[]), None);
     }
 
     #[test]
     fn matches_only_requested_extensions() {
-        let extensions = parse_extensions(Some("jpg,png")).unwrap();
+        let extensions = parse_extensions(&["jpg,png".to_owned()]).unwrap();
 
         assert!(matches_extensions(
             Path::new("photo.JPEG"),
@@ -377,6 +488,42 @@ mod tests {
         ));
         assert!(!matches_extensions(Path::new("README"), Some(&extensions)));
         assert!(matches_extensions(Path::new("README"), None));
+    }
+
+    #[test]
+    fn finds_files_in_directory_inputs() {
+        let dir = TestDir::new();
+        let top_level = write_file(dir.path(), "top-level.JPG", b"top level");
+        write_file(dir.path(), "ignored.txt", b"ignored");
+        let nested_dir = dir.path().join("nested");
+        fs::create_dir(&nested_dir).unwrap();
+        let nested = write_file(&nested_dir, "nested.png", b"nested");
+        let paths = vec![dir.path().to_string_lossy().into_owned()];
+        let extensions = parse_extensions(&["jpg,png".to_owned()]).unwrap();
+
+        let mut shallow = filter_files(&paths, Some(&extensions), false, false);
+        shallow.sort();
+        assert_eq!(shallow, vec![top_level.clone()]);
+
+        let mut recursive = filter_files(&paths, Some(&extensions), true, false);
+        recursive.sort();
+        let mut expected = vec![top_level, nested];
+        expected.sort();
+        assert_eq!(recursive, expected);
+    }
+
+    #[test]
+    fn rejects_multiple_destination_modes() {
+        let opts = GlobalOptions {
+            copy_to: Some(PathBuf::from("copied")),
+            move_to: Some(PathBuf::from("moved")),
+            ..GlobalOptions::default()
+        };
+
+        assert_eq!(
+            validate_options(&opts),
+            Err("--copy-to and --move-to cannot be used together")
+        );
     }
 
     #[test]
@@ -416,7 +563,7 @@ mod tests {
             .join(format!("{}.txt", hash_file(&source).unwrap()));
 
         let opts = GlobalOptions {
-            copy: true,
+            copy_to: Some(dir.path().to_path_buf()),
             ..GlobalOptions::default()
         };
         let result = process_file(&opts, &source).unwrap();
@@ -435,7 +582,7 @@ mod tests {
         let expected = output_dir.join(format!("{}.txt", hash_file(&source).unwrap()));
 
         let opts = GlobalOptions {
-            output_dir: Some(output_dir.clone()),
+            move_to: Some(output_dir.clone()),
             ..GlobalOptions::default()
         };
         let result = process_file(&opts, &source).unwrap();

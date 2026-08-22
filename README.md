@@ -17,73 +17,78 @@ For example, `input-file.JPEG` becomes `<hash>.jpg`. If the file has no extensio
 ## Usage
 
 ```text
-hashname [OPTIONS] [FILE ...]
+hashname [OPTIONS] [PATH ...]
 ```
 
-You can pass file paths directly or use glob patterns such as `'*.pdf'`.
+Paths can be files or directories. Directory inputs process their immediate files by default; use `--recursive` to include nested directories. Glob patterns such as `'*.pdf'` are also supported.
 
 ## Common Options
 
-- `--dry-run`: show what would happen without renaming or copying files
-- `--copy`: copy files to their hashed names instead of moving them
-- `--output-dir DIR`: write the hashed files into another directory
-- `--extensions LIST`: only process files matching a comma-separated list of extensions, case-insensitively
+- `-e, --extension EXT`: process this extension; repeat the option or use commas for multiple extensions
+- `-r, --recursive`: traverse directory inputs recursively
+- `-n, --dry-run`: preview operations without changing files
+- `--copy-to DIR`: copy renamed files into `DIR`
+- `--move-to DIR`: move renamed files into `DIR`
 - `--force-rehash`: process files even if the filename already looks like a hash
 - `--force-rename`: overwrite an existing destination path
 - `--verbose`: print skipped files and the reason they were skipped
 
+Extension matching is case-insensitive, accepts entries with or without a leading dot, and treats JPEG aliases as `.jpg`. `--copy-to` and `--move-to` create the destination directory when needed and cannot be used together.
+
 ## Examples
 
-Preview a few files:
+Rename all files in the current directory:
 
 ```sh
-hashname --dry-run doc1.pdf game.iso img.png
+hashname .
 ```
 
-Preview all JPEG and PNG files in the current directory:
+Rename JPEG and PNG files in the current directory:
 
 ```sh
-hashname --dry-run --extensions jpg,png '*'
+hashname . -e jpg -e png
 ```
 
-Extension matching is case-insensitive, accepts entries with or without a leading dot, and treats JPEG aliases as `.jpg`.
-
-Copy PNG files into a separate directory with hashed names:
+Process JPEG and PNG files recursively:
 
 ```sh
-hashname --copy --output-dir ./hashed '*.png'
+hashname photos -e jpg,png -r
 ```
 
-Rename files in place:
+Copy JPEG files into a separate directory with hashed names:
 
 ```sh
-hashname report.pdf image.png
+hashname photos -e jpg --copy-to hashed
+```
+
+Preview an operation without changing files:
+
+```sh
+hashname photos -e jpg -n
 ```
 
 ## Help Output
 
 ```text
 Usage:
-  hashname [OPTIONS] [FILE ...]
+  hashname [OPTIONS] [PATH ...]
 
 Rename files to their hash
 
 Positional arguments:
-  file                  Files to process
+  path                  Files or directories to process
 
 Optional arguments:
   -h,--help             Show this help message and exit
-  -d,--dry-run          Do not actually rename files
+  -n,--dry-run          Preview operations without changing files
   -f,--force-rehash     Process the file even if it looks like it has already
                         been processed
-  -F,--force-rename     Rename file even there is another file with the same
-                        result name
-  --extensions EXTENSIONS
-                        Only process files with an extension in this
-                        comma-separated list
-  -o,--output-dir OUTPUT_DIR
-                        Renamed files are moved to this directory
-  -c,--copy             Copy files to new name instead of moving
+  -F,--force-rename     Overwrite an existing destination file
+  -e,--extension EXTENSION
+                        Process this extension; repeatable or comma-separated
+  -r,--recursive        Traverse directory inputs recursively
+  --copy-to COPY_TO     Copy renamed files into this directory
+  --move-to MOVE_TO     Move renamed files into this directory
   -v,--verbose          Print more information during processing
   -V,--version          Print version and exit
 ```
