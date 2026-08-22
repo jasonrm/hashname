@@ -27,6 +27,7 @@ You can pass file paths directly or use glob patterns such as `'*.pdf'`.
 - `--dry-run`: show what would happen without renaming or copying files
 - `--copy`: copy files to their hashed names instead of moving them
 - `--output-dir DIR`: write the hashed files into another directory
+- `--extensions LIST`: only process files matching a comma-separated list of extensions, case-insensitively
 - `--force-rehash`: process files even if the filename already looks like a hash
 - `--force-rename`: overwrite an existing destination path
 - `--verbose`: print skipped files and the reason they were skipped
@@ -39,11 +40,13 @@ Preview a few files:
 hashname --dry-run doc1.pdf game.iso img.png
 ```
 
-Preview all PDFs in the current directory:
+Preview all JPEG and PNG files in the current directory:
 
 ```sh
-hashname --dry-run '*.pdf'
+hashname --dry-run --extensions jpg,png '*'
 ```
+
+Extension matching is case-insensitive, accepts entries with or without a leading dot, and treats JPEG aliases as `.jpg`.
 
 Copy PNG files into a separate directory with hashed names:
 
@@ -75,6 +78,9 @@ Optional arguments:
                         been processed
   -F,--force-rename     Rename file even there is another file with the same
                         result name
+  --extensions EXTENSIONS
+                        Only process files with an extension in this
+                        comma-separated list
   -o,--output-dir OUTPUT_DIR
                         Renamed files are moved to this directory
   -c,--copy             Copy files to new name instead of moving

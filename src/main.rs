@@ -17,6 +17,7 @@ struct GlobalOptions {
     force_rename: bool,
     dry_run: bool,
     version: bool,
+    extensions: Option<String>,
     output_dir: Option<PathBuf>,
     copy: bool,
     files: Vec<String>,
@@ -78,7 +79,8 @@ fn main() {
         return;
     }
 
-    filter_files(&opts.files, opts.verbose)
+    let extensions = parse_extensions(opts.extensions.as_deref());
+    filter_files(&opts.files, extensions.as_deref(), opts.verbose)
         .par_iter()
         .for_each(|path| match process_file(&opts, path) {
             Ok(result) => println!("\"{}\" -> \"{}\"", path.display(), result.display()),
@@ -107,6 +109,11 @@ fn parse_args(opts: &mut GlobalOptions) {
         StoreTrue,
         "Rename file even there is another file with the same result name",
     );
+    ap.refer(&mut opts.extensions).add_option(
+        &["--extensions"],
+        StoreOption,
+        "Only process files with an extension in this comma-separated list",
+    );
     ap.refer(&mut opts.output_dir).add_option(
         &["-o", "--output-dir"],
         StoreOption,
@@ -132,19 +139,27 @@ fn parse_args(opts: &mut GlobalOptions) {
     ap.parse_args_or_exit();
 }
 
-fn filter_files(file_paths: &[String], verbose: bool) -> Vec<PathBuf> {
+fn filter_files(
+    file_paths: &[String],
+    extensions: Option<&[String]>,
+    verbose: bool,
+) -> Vec<PathBuf> {
     let mut valid_files = Vec::new();
 
     for path in file_paths {
         let candidate = Path::new(path);
         if candidate.exists() {
-            valid_files.push(candidate.to_path_buf());
+            if matches_extensions(candidate, extensions) {
+                valid_files.push(candidate.to_path_buf());
+            }
         } else {
             match glob(path) {
                 Ok(entries) => {
                     for entry in entries {
                         match entry {
-                            Ok(path) if path.exists() => valid_files.push(path),
+                            Ok(path) if path.exists() && matches_extensions(&path, extensions) => {
+                                valid_files.push(path)
+                            }
                             Ok(_) => {}
                             Err(err) if verbose => {
                                 eprintln!("Skipped glob entry for \"{path}\": {err}")
@@ -160,6 +175,30 @@ fn filter_files(file_paths: &[String], verbose: bool) -> Vec<PathBuf> {
     }
 
     valid_files
+}
+
+fn parse_extensions(extensions: Option<&str>) -> Option<Vec<String>> {
+    extensions.map(|extensions| {
+        extensions
+            .split(',')
+            .map(str::trim)
+            .map(|extension| extension.trim_start_matches('.'))
+            .filter(|extension| !extension.is_empty())
+            .map(normalize_extension)
+            .collect()
+    })
+}
+
+fn matches_extensions(path: &Path, extensions: Option<&[String]>) -> bool {
+    let Some(extensions) = extensions else {
+        return true;
+    };
+    let Some(extension) = path.extension().and_then(OsStr::to_str) else {
+        return false;
+    };
+    let extension = normalize_extension(extension);
+
+    extensions.iter().any(|candidate| candidate == &extension)
 }
 
 fn process_file(opts: &GlobalOptions, raw_path: &Path) -> Result<PathBuf, ProcessFileError> {
@@ -309,6 +348,35 @@ mod tests {
         assert_eq!(normalize_extension("PNG"), "png");
         assert_eq!(normalize_extension("JPEG"), "jpg");
         assert_eq!(normalize_extension("jpe"), "jpg");
+    }
+
+    #[test]
+    fn parses_case_insensitive_extension_lists() {
+        assert_eq!(
+            parse_extensions(Some(" JPG, .PnG, jpeg ")),
+            Some(vec!["jpg".to_owned(), "png".to_owned(), "jpg".to_owned()])
+        );
+        assert_eq!(parse_extensions(None), None);
+    }
+
+    #[test]
+    fn matches_only_requested_extensions() {
+        let extensions = parse_extensions(Some("jpg,png")).unwrap();
+
+        assert!(matches_extensions(
+            Path::new("photo.JPEG"),
+            Some(&extensions)
+        ));
+        assert!(matches_extensions(
+            Path::new("image.PNG"),
+            Some(&extensions)
+        ));
+        assert!(!matches_extensions(
+            Path::new("document.txt"),
+            Some(&extensions)
+        ));
+        assert!(!matches_extensions(Path::new("README"), Some(&extensions)));
+        assert!(matches_extensions(Path::new("README"), None));
     }
 
     #[test]
